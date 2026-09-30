@@ -1,0 +1,56 @@
+"""Sign-in routes for the Desktop half, mounted at /api/plugins/cloudflare-ai-gateway/.
+
+Desktop opens the returned browser URL on the user's machine (``ctx.os.openExternal``); the
+backend finishes the encrypted transfer, so this works for local and remote backends alike.
+"""
+from fastapi import APIRouter, HTTPException
+
+router = APIRouter()
+
+
+def _ensure_marker():
+    # Mounted at backend startup, before any turn: the plugin's credential marker is in place even
+    # when provider discovery ran too early in the import graph to write it.
+    from providers import get_provider_profile
+    profile = get_provider_profile("cloudflare-ai-gateway")
+    module = __import__(type(profile).__module__, fromlist=["ensure_credential_marker"]) if profile else None
+    if module is not None:
+        module.ensure_credential_marker()
+
+
+try:
+    _ensure_marker()
+except Exception:
+    pass
+
+
+def _session():
+    from providers import get_provider_profile
+    profile = get_provider_profile("cloudflare-ai-gateway")
+    if profile is None:
+        raise HTTPException(503, "The cloudflare-ai-gateway provider plugin is not loaded.")
+    try:
+        return profile.access_session()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.get("/status")
+def status():
+    return _session().status()
+
+
+@router.post("/sign-in")
+def sign_in():
+    session = _session()
+    try:
+        attempt = session.start_sign_in()
+    except Exception as exc:
+        raise HTTPException(502, f"Could not reach Cloudflare Access: {exc}") from None
+    return {**session.status(), "browser_url": attempt.browser_url}
+
+
+@router.post("/sign-out")
+def sign_out():
+    session = _session()
+    return {"cleared": session.clear(), **session.status()}

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+.hermes/
+auth.json
+*.egg-info/
+dist/
+build/
+!dashboard/dist/

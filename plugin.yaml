@@ -1,0 +1,4 @@
+name: cloudflare-ai-gateway
+kind: model-provider
+version: 0.2.0
+description: Cloudflare AI Gateway with Cloudflare Access browser sign-in

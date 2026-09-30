@@ -1,0 +1,7 @@
+{
+  "name": "cloudflare-ai-gateway",
+  "label": "Cloudflare AI Gateway",
+  "description": "Cloudflare Access sign-in for the Cloudflare AI Gateway provider",
+  "api": "plugin_api.py",
+  "tab": { "hidden": true }
+}
