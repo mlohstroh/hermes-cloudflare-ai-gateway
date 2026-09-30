@@ -38,9 +38,13 @@ sign in as yourself instead of managing API keys.
 Use your gateway's custom domain, e.g. `https://ai.example.com/compat`.
 
 Click **Cloudflare: sign in** in the bottom-right of Hermes Desktop, sign in in your browser, and
-start chatting. If a message fails because you're signed out, your browser opens the sign-in
-page — sign in, then press **Retry**. You can also sign in or out from the command palette
-(⌘K / Ctrl+K).
+start chatting. If you send a message while signed out, your browser opens the sign-in page and
+the message waits; once you sign in it continues on its own. If you don't finish within about
+two minutes, the message fails and you can press **Retry** after signing in. You can also sign
+in or out from the command palette (⌘K / Ctrl+K).
+
+Each Hermes profile (including each Desktop bot) has its own sign-in. A profile with its own
+copy of the plugin (`~/.hermes/profiles/<name>/plugins/`) loads that copy, so update it too.
 
 Your Access application must accept the user's token as a bearer token. Tokens renew silently
 while your Access global session is valid, so session settings decide how often you sign in.

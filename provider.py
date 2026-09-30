@@ -12,6 +12,7 @@ their client through :meth:`GatewayProfile.create_client`. Two auth modes:
   provider's key for an unauthenticated gateway.
 """
 import logging
+import threading
 from urllib.parse import urlsplit
 
 import httpx
@@ -76,6 +77,7 @@ class EndpointTransport(httpx.BaseTransport):
     def __init__(self, base_url):
         self.base_url = base_url
         self.inner = httpx.HTTPTransport()
+        self.closed = threading.Event()  # Hermes closes a request's client to stop it
 
     def handle_request(self, request):
         if not str(request.url).split("?", 1)[0].startswith(self.base_url + "/"):
@@ -85,14 +87,16 @@ class EndpointTransport(httpx.BaseTransport):
         return self.inner.handle_request(request)
 
     def close(self):
+        self.closed.set()
         self.inner.close()
 
 
 class AccessTransport(EndpointTransport):
-    """Also retries a 401 once after renewing the Access token.
+    """Also retries a 401 once with a new Access token: renewed silently, or, for a real turn,
+    from the browser sign-in the request waits for.
 
     A 401 comes from Access at the edge, before the gateway runs anything, so resending the same
-    request with a renewed token cannot duplicate work.
+    request with a new token cannot duplicate work.
     """
 
     def __init__(self, session, interactive=True):
@@ -106,9 +110,12 @@ class AccessTransport(EndpointTransport):
             return response
         self.session.reject(request.headers.get("Authorization", ""))
         token = self.session.renew()
+        if token is None and self.interactive:
+            try:
+                token = self.session.await_sign_in(self.closed.is_set)
+            except Exception:
+                return response  # the 401 fails the turn as an auth error
         if token is None:
-            if self.interactive:
-                self.session.start_sign_in()
             return response
         response.close()
         request.headers["Authorization"] = "Bearer " + token
@@ -123,7 +130,8 @@ def _client(api_key, base_url, transport, kwargs):
 
 
 def make_client(session, interactive=True, **kwargs):
-    return _client(lambda: session.bearer(interactive), session.base_url, AccessTransport(session, interactive), kwargs)
+    transport = AccessTransport(session, interactive)
+    return _client(lambda: session.bearer(interactive, transport.closed.is_set), session.base_url, transport, kwargs)
 
 
 def make_token_client(base_url, api_key, **kwargs):

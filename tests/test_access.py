@@ -62,6 +62,7 @@ def exchange(monkeypatch):
                      'aud':'application','iat':int(time.time()),'type':'match'})
     app_token = sign({'iss':issuer,'aud':['application'],'iat':int(time.time()),'exp':int(time.time()+600)})
     org_token = sign({'iss':issuer,'aud':'team','iat':int(time.time()),'exp':int(time.time()+86400)})
+    payload = {'app_token':app_token,'org_token':org_token}
     requests = []
     def server(request):
         requests.append(request)
@@ -72,7 +73,7 @@ def exchange(monkeypatch):
             return httpx.Response(200, json={'keys':[key]})
         recipient = base64.urlsafe_b64decode(request.url.path.rsplit('/',1)[-1])
         peer = naclbox.PrivateKey()
-        encrypted = box_seal(peer, recipient, json.dumps({'app_token':app_token,'org_token':org_token}).encode())
+        encrypted = box_seal(peer, recipient, json.dumps(payload).encode())
         return httpx.Response(200, headers={'service-public-key':base64.urlsafe_b64encode(peer.public_key).decode()},
                               content=base64.b64encode(encrypted))
     original = httpx.Client
@@ -80,11 +81,11 @@ def exchange(monkeypatch):
         def __init__(self, **kwargs):
             super().__init__(transport=httpx.MockTransport(server), **kwargs)
     monkeypatch.setattr(httpx, 'Client', Client)
-    return app_token, requests, sign, key
+    return app_token, requests, sign, key, payload
 
 
 def test_native_encrypted_transfer_and_fresh_keys(exchange):
-    expected, requests, _, _ = exchange
+    expected, requests, *_ = exchange
     a = access.Transfer('https://gateway.example')
     b = access.Transfer('https://gateway.example')
     assert a.browser_url != b.browser_url
@@ -97,8 +98,22 @@ def test_native_encrypted_transfer_and_fresh_keys(exchange):
     a.close(); b.close()
 
 
+def test_transfer_without_org_session_keeps_app_token(exchange):
+    # Access sends the placeholder when the browser has no org session to hand over; an org token
+    # that fails verification is dropped the same way. Either way the app token is the grant.
+    expected, _, _, _, payload = exchange
+    alien = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    forged = jwt.encode({'exp': int(time.time() + 86400)}, alien, algorithm='RS256', headers={'kid': 'test-key'})
+    for org in ('not-available', forged):
+        payload['org_token'] = org
+        a = access.Transfer('https://gateway.example')
+        grant = a.wait(lambda:False)
+        assert grant == {'app_token': expected, 'app_expires_at': grant['app_expires_at']}
+        a.close()
+
+
 def test_cancel_does_not_poll(exchange):
-    _, requests, _, _ = exchange
+    _, requests, *_ = exchange
     a = access.Transfer('https://gateway.example')
     before = len(requests)
     with pytest.raises(ValueError, match='cancelled'):
@@ -108,7 +123,7 @@ def test_cancel_does_not_poll(exchange):
 
 
 def test_signature_audience_issuer_expiry(exchange):
-    _, _, sign, key = exchange
+    _, _, sign, key, _ = exchange
     claims = {'iss':'https://team.cloudflareaccess.com','aud':'application','iat':int(time.time()),'exp':int(time.time()+600)}
     for replacement in ({'aud':'other'},{'iss':'https://attacker.example'},{'exp':int(time.time()-30)}):
         with pytest.raises(jwt.InvalidTokenError):

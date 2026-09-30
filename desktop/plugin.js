@@ -41,11 +41,24 @@ export default {
   name: 'Cloudflare AI Gateway',
   register(ctx) {
     const opened = new Set()
+    // One toast slot for the whole sign-in story: each notify with this id replaces the previous
+    // one, so "Signed in" clears the sticky "sign-in required" warning (the SDK has no dismiss).
+    const TOAST = `${ID}:sign-in`
+    let warning = false
+    const toast = input => {
+      warning = input.kind === 'warning' || input.kind === 'error'
+      host.notify({ id: TOAST, ...input })
+    }
+    const signedIn = () => toast({ kind: 'success', title: 'Signed in to Cloudflare', message: 'A waiting message continues automatically.' })
 
     const refresh = () =>
       ctx
         .rest('/status')
-        .then(setStatus)
+        .then(s => {
+          setStatus(s)
+          // Safety net for a missed completion event: never leave the warning up once signed in.
+          if (warning && s?.signed_in && !s?.pending) signedIn()
+        })
         .catch(() => setStatus(null))
 
     const open = url => {
@@ -60,7 +73,7 @@ export default {
         setStatus(s)
         opened.delete(s.browser_url) // an explicit click always reopens
         open(s.browser_url)
-        host.notify({ kind: 'info', title: 'Cloudflare sign-in', message: 'Finish signing in in your browser.' })
+        toast({ kind: 'info', title: 'Cloudflare sign-in', message: 'Finish signing in in your browser.' })
       } catch (error) {
         host.notifyError(error, 'Could not start Cloudflare sign-in')
       }
@@ -78,22 +91,22 @@ export default {
     ctx.onEvent(EVENT + 'signin.required', ({ payload }) => {
       open(payload?.browser_url)
       void refresh()
-      host.notify({
+      toast({
         kind: 'warning',
         title: 'Cloudflare sign-in required',
-        message: 'Your Cloudflare session ended. Finish signing in in your browser, then press Retry.',
+        message: 'Your Cloudflare session ended. Finish signing in in your browser; your message will continue.',
         action: { label: 'Open sign-in page', onClick: () => void ctx.os.openExternal(payload?.browser_url) }
       })
     })
 
     ctx.onEvent(EVENT + 'signin.completed', () => {
+      signedIn()
       void refresh()
-      host.notify({ kind: 'success', title: 'Signed in to Cloudflare', message: 'Press Retry to resend your last message.' })
     })
 
     ctx.onEvent(EVENT + 'signin.failed', ({ payload }) => {
       void refresh()
-      host.notify({
+      toast({
         kind: 'error',
         title: 'Cloudflare sign-in failed',
         message: payload?.message || 'Sign-in did not complete.',
@@ -129,5 +142,6 @@ export default {
 
     void refresh()
     ctx.setInterval(() => void refresh(), 60_000)
+    ctx.setInterval(() => void (warning && refresh()), 5_000) // clear a stale warning quickly
   }
 }

@@ -4,7 +4,8 @@ State lives in ``$HERMES_HOME/cloudflare-ai-gateway/session.json`` (0600), per p
 to the exact inference URL. Hermes never holds the bearer: the SDK client asks
 :meth:`GatewaySession.bearer` before every request, so renewal needs no client rebuild and
 never touches conversation state. The org session renews app tokens silently; only when it
-ends does a browser sign-in start, surfaced to Desktop as a plugin event.
+ends does a browser sign-in start, surfaced to Desktop as a plugin event, and the request that
+needed it waits for that sign-in instead of failing the turn.
 """
 import json
 import logging
@@ -20,6 +21,9 @@ from .access import SessionExpired, Transfer, discover, exchange_org_token, veri
 
 PROVIDER = "cloudflare-ai-gateway"
 SKEW = 120  # renew this many seconds before an app token expires
+# How long a request waits for a browser sign-in: under Hermes' 180s stale-call watchdog, so the
+# turn fails as an auth error (no retry, no fallback) rather than as an unresponsive provider.
+SIGN_IN_WAIT = 150
 
 logger = logging.getLogger(__name__)
 _lock = threading.RLock()
@@ -48,11 +52,11 @@ def _forget_cached_catalog():
         logger.debug("Could not clear the cached model catalog", exc_info=True)
 
 
-def sign_in_required(browser_url):
+def sign_in_required(browser_url, reason=None):
     """The typed error a turn fails with; ``classify_api_error`` maps it to a no-retry auth verdict."""
     error = _hermes_auth_error()(
-        "Sign in to Cloudflare Access to continue, then press Retry. "
-        f"If no browser window opened, open this link: {browser_url}",
+        (reason or "Cloudflare Access sign-in was not finished in time.")
+        + f" Sign in, then press Retry. If no browser window opened, open this link: {browser_url}",
         provider=PROVIDER, code="reauth_required", relogin_required=True)
     error.cloudflare_sign_in_url = browser_url
     return error
@@ -92,6 +96,7 @@ class SignIn:
         except Exception as exc:
             self.error = str(exc)
             if not self.cancelled:
+                logger.warning("Cloudflare Access sign-in for %s failed: %s", self.session.base_url, exc)
                 _broadcast("signin.failed", {"base_url": self.session.base_url, "message": self.error})
         finally:
             self.transfer.close()
@@ -162,9 +167,9 @@ class GatewaySession:
             logger.info("Renewed the Cloudflare Access token for %s", self.base_url)
             return token
 
-    def bearer(self, interactive=True):
-        """The current app token, renewing silently; otherwise raise (starting a browser sign-in
-        when *interactive* — a real turn, not a background catalog read)."""
+    def bearer(self, interactive=True, cancelled=None):
+        """The current app token, renewing silently. Otherwise, for a real turn (*interactive*),
+        wait for a browser sign-in; a background catalog read raises instead."""
         if (token := self._usable_app_token(self.read())) is not None:
             return token
         if (token := self.renew()) is not None:
@@ -172,7 +177,27 @@ class GatewaySession:
         if not interactive:
             raise _hermes_auth_error()("Not signed in to Cloudflare Access.", provider=PROVIDER,
                                        code="reauth_required", relogin_required=True)
-        raise sign_in_required(self.start_sign_in().browser_url)
+        return self.await_sign_in(cancelled)
+
+    def await_sign_in(self, cancelled=None):
+        """Start (or join) the browser sign-in and block until it saves a grant; returns its app
+        token. Raises the no-retry sign-in error if it fails, is cancelled (sign-out), is not
+        finished within :data:`SIGN_IN_WAIT`, or *cancelled()* turns true (Hermes closed the
+        client: the turn was stopped)."""
+        attempt = self.start_sign_in()
+        deadline = time.monotonic() + SIGN_IN_WAIT
+        while not attempt.done.wait(.25):
+            if cancelled is not None and cancelled():
+                raise sign_in_required(attempt.browser_url, "The request was stopped before Cloudflare Access sign-in finished.")
+            if time.monotonic() >= deadline:
+                raise sign_in_required(attempt.browser_url)
+        state = self.read()
+        # Any unexpired token, not _usable_app_token: Access may hand over the browser's existing
+        # app token even when it is inside the renewal skew.
+        if state.get("app_token") and not state.get("rejected") and state.get("app_expires_at", 0) > time.time():
+            return state["app_token"]
+        reason = f"Cloudflare Access sign-in failed: {attempt.error.rstrip('.')}." if attempt.error else "Cloudflare Access sign-in did not complete."
+        raise sign_in_required(attempt.browser_url, reason)
 
     def reject(self, bearer):
         """A 401 for *bearer*: drop it only if it is still the current token (a late 401 from an

@@ -7,6 +7,7 @@ only ever sent to the verified team domain.
 """
 import base64
 import json
+import logging
 import time
 from urllib.parse import urlencode, urljoin, urlsplit
 
@@ -20,6 +21,8 @@ APP_SESSION_COOKIE = "CF_AppSession"
 LOGIN_PATH = "/cdn-cgi/access/login"
 AUTHORIZED_PATH = "/cdn-cgi/access/authorized"
 MAX_RESPONSE = 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class SessionExpired(Exception):
@@ -108,10 +111,16 @@ class Transfer:
                 app = payload["app_token"]
                 claims = verify_app_token(app, self.issuer, self.audience, self.keys)
                 grant = {"app_token": app, "app_expires_at": claims["exp"]}
+                # The org token only enables silent renewal. Without an org session to hand over,
+                # Access sends a placeholder ("not-available") instead of a JWT; an org token that
+                # does not verify is dropped, and the verified app token alone is still the grant.
                 org = payload.get("org_token")
                 if org:
-                    org_claims = verify_jwt(org, self.keys, options={"verify_aud": False, "require": ["exp"]})
-                    grant.update(org_token=org, org_expires_at=org_claims["exp"])
+                    try:
+                        org_claims = verify_jwt(org, self.keys, options={"verify_aud": False, "require": ["exp"]})
+                        grant.update(org_token=org, org_expires_at=org_claims["exp"])
+                    except (jwt.InvalidTokenError, ValueError, KeyError):
+                        logger.info("Access sent no usable org token; this sign-in will not renew silently.")
                 return grant
             if status >= 500 or 300 <= status < 400:
                 raise ValueError("Access token transfer failed. Please sign in again.")

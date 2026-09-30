@@ -176,12 +176,54 @@ class FakeTransfer:
         pass
 
 
-def test_ended_session_fails_the_turn_once_then_retry_reuses_the_agent(home, plugin, gateway, monkeypatch):
-    profile, session_mod, events = plugin
-    seen, _ = gateway
+def signing_in(monkeypatch, session_mod):
     FakeTransfer.instances = []
     monkeypatch.setattr(session_mod, 'Transfer', FakeTransfer)
     monkeypatch.setattr(session_mod.GatewaySession, 'verify_inference', lambda self, token: None)
+
+
+def approve_when_started(events, delay=.3):
+    """Play the user: wait for the sign-in to start, then finish it in the "browser"."""
+    def run():
+        deadline = time.monotonic() + 10
+        while not FakeTransfer.instances and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(delay)
+        FakeTransfer.instances[0].approved.set()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def test_ended_session_waits_for_sign_in_then_the_turn_continues(home, plugin, gateway, monkeypatch):
+    _, session_mod, events = plugin
+    seen, _ = gateway
+    signing_in(monkeypatch, session_mod)
+    write_state(home, app_token='old', app_expires_at=time.time() - 1)
+    approve_when_started(events)
+    result = agent().run_conversation('hi')
+    assert result['final_response'] == 'OK' and not result.get('failed')
+    assert len(FakeTransfer.instances) == 1  # one browser window
+    assert [r.headers['authorization'] for r in seen] == ['Bearer signed-in']  # nothing sent before sign-in
+    assert [e for e, _ in events] == ['signin.required', 'signin.completed']
+    assert events[0][1]['browser_url'] == FakeTransfer.instances[0].browser_url
+
+
+def test_gateway_401_without_org_session_waits_for_sign_in_and_resends(home, plugin, gateway, monkeypatch):
+    _, session_mod, events = plugin
+    seen, rejected = gateway
+    rejected.add('revoked')
+    signing_in(monkeypatch, session_mod)
+    write_state(home, app_token='revoked', app_expires_at=time.time() + 3600)
+    approve_when_started(events)
+    assert agent().run_conversation('hi')['final_response'] == 'OK'
+    assert [r.headers['authorization'] for r in seen] == ['Bearer revoked', 'Bearer signed-in']
+    assert len(FakeTransfer.instances) == 1
+
+
+def test_unfinished_sign_in_fails_the_turn_once_then_retry_reuses_the_agent(home, plugin, gateway, monkeypatch):
+    profile, session_mod, events = plugin
+    seen, _ = gateway
+    signing_in(monkeypatch, session_mod)
+    monkeypatch.setattr(session_mod, 'SIGN_IN_WAIT', .5)
     write_state(home, app_token='old', app_expires_at=time.time() - 1)
     from agent.error_surface import build_error_surface_from_result
     main = agent()
@@ -193,7 +235,6 @@ def test_ended_session_fails_the_turn_once_then_retry_reuses_the_agent(home, plu
     surface = build_error_surface_from_result(failed, provider=PLUGIN)
     assert surface['layer'] == 'auth' and not surface['retryable']
     assert [e for e, _ in events] == ['signin.required']
-    assert events[0][1]['browser_url'] == FakeTransfer.instances[0].browser_url
 
     FakeTransfer.instances[0].approved.set()
     deadline = time.monotonic() + 10
@@ -202,6 +243,31 @@ def test_ended_session_fails_the_turn_once_then_retry_reuses_the_agent(home, plu
     retried = main.run_conversation('hi')
     assert retried['final_response'] == 'OK' and main.client is client
     assert seen[-1].headers['authorization'] == 'Bearer signed-in'
+
+
+def test_stopping_the_request_ends_the_sign_in_wait(home, plugin, monkeypatch):
+    profile, session_mod, _ = plugin
+    signing_in(monkeypatch, session_mod)
+    write_state(home, app_token='old', app_expires_at=time.time() - 1)
+    client = profile.create_client(api_key=PLACEHOLDER, base_url=BASE, max_retries=0)
+    threading.Timer(.3, client.close).start()  # how Hermes stops a request
+    started = time.monotonic()
+    with pytest.raises(Exception, match='stopped before Cloudflare Access sign-in finished'):
+        client.chat.completions.create(model='openrouter/vendor/model', messages=[{'role': 'user', 'content': 'hi'}])
+    assert time.monotonic() - started < 5
+    FakeTransfer.instances[0].approved.set()
+
+
+def test_failed_sign_in_ends_the_wait_with_its_reason(home, plugin, monkeypatch):
+    _, session_mod, _ = plugin
+    signing_in(monkeypatch, session_mod)
+    def reject(self, token):
+        raise ValueError('The gateway denied this identity. Check the Access policy.')
+    monkeypatch.setattr(session_mod.GatewaySession, 'verify_inference', reject)
+    session = session_mod.GatewaySession(home, BASE)
+    approve_when_started([], delay=0)
+    with pytest.raises(Exception, match='sign-in failed: The gateway denied this identity. Check the Access policy. Sign in'):
+        session.bearer()
 
 
 def test_desktop_routes_are_mounted_by_hermes_and_drive_sign_in(home, plugin, monkeypatch):
