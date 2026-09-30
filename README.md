@@ -11,27 +11,31 @@ sign in as yourself instead of managing API keys.
 
 ## Install
 
-1. Copy this repository to `~/.hermes/plugins/cloudflare-ai-gateway/`.
-2. Copy `desktop/plugin.js` to `~/.hermes/desktop-plugins/cloudflare-ai-gateway/plugin.js`
-   (needed for Access sign-in).
-3. Add to `~/.hermes/config.yaml`, with the `base_url` for your gateway (see below):
+Requires Hermes v0.21.5 (2026.9.24) or later.
 
-   ```yaml
-   model:
-     provider: cloudflare-ai-gateway
-     default: openrouter/deepseek/deepseek-v4.1-flash
+```sh
+hermes plugins install mlohstroh/hermes-cloudflare-ai-gateway
+hermes plugins enable cloudflare-ai-gateway
+```
 
-   providers:
-     cloudflare-ai-gateway:
-       base_url: https://ai.example.com/compat
-       model: openrouter/deepseek/deepseek-v4.1-flash
+Or, in Hermes Desktop, open
+[hermes://plugin/install?repo=mlohstroh/hermes-cloudflare-ai-gateway](hermes://plugin/install?repo=mlohstroh/hermes-cloudflare-ai-gateway).
 
-   plugins:
-     enabled:
-       - cloudflare-ai-gateway
-   ```
+Then point Hermes at your gateway in `~/.hermes/config.yaml` (see below for `base_url`):
 
-4. Restart Hermes.
+```yaml
+model:
+  provider: cloudflare-ai-gateway
+  default: openrouter/deepseek/deepseek-v4.1-flash
+
+providers:
+  cloudflare-ai-gateway:
+    base_url: https://ai.example.com/compat
+    model: openrouter/deepseek/deepseek-v4.1-flash
+```
+
+Restart Hermes. For Access sign-in, also turn on **Cloudflare AI Gateway** in Hermes Desktop
+under **Capabilities → Plugins** (Desktop adds plugin UI switched off until you enable it).
 
 ## Gateway behind Cloudflare Access
 

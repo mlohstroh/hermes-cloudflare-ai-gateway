@@ -1,4 +1,5 @@
 name: cloudflare-ai-gateway
 kind: model-provider
-version: 0.2.0
-description: Cloudflare AI Gateway with Cloudflare Access browser sign-in
+version: 1.0.0
+description: Cloudflare AI Gateway, with Cloudflare Access sign-in or an API token
+requires_hermes: ">=0.21.5"
