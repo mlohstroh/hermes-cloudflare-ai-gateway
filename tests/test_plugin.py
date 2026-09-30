@@ -227,3 +227,45 @@ def test_desktop_routes_are_mounted_by_hermes_and_drive_sign_in(home, plugin, mo
     write_state(home, app_token='x', app_expires_at=time.time() + 3600)
     assert client.post('/sign-out').json()['cleared'] is True
     assert client.get('/status').json()['signed_in'] is False
+
+
+TOKEN_BASE = 'https://gateway.ai.cloudflare.com/v1/acct123/my-gateway/compat'
+
+
+@pytest.fixture
+def token_home(home, monkeypatch):
+    """A gateway on Cloudflare's own host (no Access), authenticated with a Cloudflare API token."""
+    (home / 'config.yaml').write_text(
+        f'model:\n  provider: {PLUGIN}\n  default: openrouter/vendor/model\n'
+        f'providers:\n  {PLUGIN}:\n    base_url: {TOKEN_BASE}\n    model: openrouter/vendor/model\n'
+        f'plugins:\n  enabled: [{PLUGIN}]\n')
+    monkeypatch.setenv('CLOUDFLARE_AI_GATEWAY_TOKEN', 'cf-api-token')
+    return home
+
+
+def test_gateway_without_access_uses_the_configured_token_on_every_path(token_home, gateway):
+    seen, _ = gateway
+    from providers import get_provider_profile
+    from agent.credential_pool import load_pool
+    from agent.auxiliary_client import resolve_provider_client
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    profile = get_provider_profile(PLUGIN)
+    assert profile.base_url == TOKEN_BASE and profile.auth_mode() == 'token'
+    assert not [e for e in load_pool(PLUGIN).entries() if e.access_token == PLACEHOLDER]
+    rt = resolve_runtime_provider(requested=PLUGIN)
+    main = agent()
+    assert main.run_conversation('hi')['final_response'] == 'OK'
+    aux, model = resolve_provider_client(PLUGIN, model='openrouter/vendor/model', main_runtime=rt)
+    aux.chat.completions.create(model=model, messages=[{'role': 'user', 'content': 'hi'}])
+    assert {r.headers['authorization'] for r in seen} == {'Bearer cf-api-token'}
+    assert all(str(r.url).startswith(TOKEN_BASE + '/') for r in seen)
+    assert not (token_home / PLUGIN / 'session.json').exists()
+
+
+def test_gateway_without_access_and_no_token_asks_for_the_token(token_home, monkeypatch):
+    monkeypatch.delenv('CLOUDFLARE_AI_GATEWAY_TOKEN')
+    from providers import get_provider_profile
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    assert get_provider_profile(PLUGIN) is not None
+    with pytest.raises(Exception, match='CLOUDFLARE_AI_GATEWAY_TOKEN'):
+        resolve_runtime_provider(requested=PLUGIN)

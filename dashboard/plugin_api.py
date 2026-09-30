@@ -24,12 +24,19 @@ except Exception:
     pass
 
 
-def _session():
+def _profile():
     from providers import get_provider_profile
     profile = get_provider_profile("cloudflare-ai-gateway")
     if profile is None:
         raise HTTPException(503, "The cloudflare-ai-gateway provider plugin is not loaded.")
+    return profile
+
+
+def _session():
+    profile = _profile()
     try:
+        if profile.auth_mode() != "access":
+            raise HTTPException(400, "This gateway uses an API token, not Cloudflare Access sign-in.")
         return profile.access_session()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
@@ -37,7 +44,11 @@ def _session():
 
 @router.get("/status")
 def status():
-    return _session().status()
+    try:
+        mode = _profile().auth_mode()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"mode": "token"} if mode == "token" else {"mode": "access", **_session().status()}
 
 
 @router.post("/sign-in")
@@ -47,10 +58,10 @@ def sign_in():
         attempt = session.start_sign_in()
     except Exception as exc:
         raise HTTPException(502, f"Could not reach Cloudflare Access: {exc}") from None
-    return {**session.status(), "browser_url": attempt.browser_url}
+    return {"mode": "access", **session.status(), "browser_url": attempt.browser_url}
 
 
 @router.post("/sign-out")
 def sign_out():
     session = _session()
-    return {"cleared": session.clear(), **session.status()}
+    return {"mode": "access", "cleared": session.clear(), **session.status()}

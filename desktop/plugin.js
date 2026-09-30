@@ -103,6 +103,7 @@ export default {
 
     function Chip() {
       const s = useSyncExternalStore(subscribe, () => status)
+      if (s?.mode === 'token') return null // API-token gateway: nothing to sign in to
       return jsx('button', {
         type: 'button',
         title: detail(s),
